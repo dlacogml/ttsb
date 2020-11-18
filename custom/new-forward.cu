@@ -2,7 +2,8 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 16
+#define LAYER1_WIDTH 8
+#define LAYER2_WIDTH 20
 
 __global__ void conv_forward_kernel(float* y, const float* x, const float* k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
@@ -26,7 +27,7 @@ __global__ void conv_forward_kernel(float* y, const float* x, const float* k, co
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int s_width = TILE_WIDTH + K - 1;
+    const int s_width = blockDim.x + K - 1;
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
@@ -35,18 +36,18 @@ __global__ void conv_forward_kernel(float* y, const float* x, const float* k, co
 
     // Insert your GPU convolution kernel code here
     const int m = blockIdx.z;
-    const int h = blockIdx.y*TILE_WIDTH + threadIdx.y;
-    const int w = blockIdx.x*TILE_WIDTH + threadIdx.x;
+    const int h = blockIdx.y*blockDim.y + threadIdx.y;
+    const int w = blockIdx.x*blockDim.x + threadIdx.x;
 
     for (int b = 0; b < B; ++b) {
         // Copy input to shared memory
-        for (int i = 0; i * TILE_WIDTH < s_width; ++i) {
-            for (int j = 0; j * TILE_WIDTH < s_width; ++j) {
-                int s_h = i * TILE_WIDTH + threadIdx.y;
-                int s_w = j * TILE_WIDTH + threadIdx.x;
+        for (int i = 0; i * blockDim.y < s_width; ++i) {
+            for (int j = 0; j * blockDim.x < s_width; ++j) {
+                int s_h = i * blockDim.y + threadIdx.y;
+                int s_w = j * blockDim.x + threadIdx.x;
                 if (s_h < s_width && s_w < s_width) {
-                    int i_h = i * TILE_WIDTH + h;
-                    int i_w = j * TILE_WIDTH + w;
+                    int i_h = i * blockDim.y + h;
+                    int i_w = j * blockDim.x + w;
                     for (int c = 0; c < C; ++c) {
                         if (i_h < H && i_w < W) {
                             s3d(c, s_h, s_w) = x4d(b, c, i_h, i_w);
@@ -106,12 +107,11 @@ __host__ void GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
     cudaMemcpy(device_k, host_k, kernelArrayLength * sizeof(*host_k), cudaMemcpyHostToDevice);
 
     // Set the kernel dimensions and call the kernel
-    dim3 dimGrid(ceil((float)W_out / TILE_WIDTH), ceil((float)H_out / TILE_WIDTH), M);
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    unsigned int tile_width = (C == 1) ? LAYER1_WIDTH : LAYER2_WIDTH;
+    dim3 dimGrid(ceil((float)W_out / tile_width), ceil((float)H_out / tile_width), M);
+    dim3 dimBlock(tile_width, tile_width, 1);
 
-    unsigned int s_size = C * (TILE_WIDTH + K - 1) * (TILE_WIDTH + K - 1) * sizeof(float);
-    printf("B: %u\tM: %u\tC: %u\tH: %u\tW: %u\tK: %u\n", B, M, C, H, W, K);
-    printf("s_size: %u\n", s_size);
+    unsigned int s_size = C * (tile_width + K - 1) * (tile_width + K - 1) * sizeof(float);
     conv_forward_kernel<<<dimGrid, dimBlock, s_size>>>(device_y, device_x, device_k, B, M, C, H, W, K);
 
     // Copy the output back to host
