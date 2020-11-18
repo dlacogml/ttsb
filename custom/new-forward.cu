@@ -4,7 +4,9 @@
 
 #define TILE_WIDTH 16
 
-__global__ void conv_forward_kernel(float* y, const float* x, const float* k, const int B, const int M, const int C, const int H, const int W, const int K)
+__constant__ float c_kernel[10000];
+
+__global__ void conv_forward_kernel(float* y, const float* x, const float * k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
     /*
     Modify this function to implement the forward pass described in Chapter 16.
@@ -35,7 +37,7 @@ __global__ void conv_forward_kernel(float* y, const float* x, const float* k, co
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define k4d(i3, i2, i1, i0) c_kernel[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     // Insert your GPU convolution kernel code here
     const int m = blockIdx.z;
@@ -84,12 +86,14 @@ __host__ void GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
 
     cudaMemcpy(device_x, host_x, inputArrayLength * sizeof(*host_x), cudaMemcpyHostToDevice);
     cudaMemcpy(device_k, host_k, kernelArrayLength * sizeof(*host_k), cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(c_kernel, host_k, kernelArrayLength*sizeof(*host_k),0 , cudaMemcpyHostToDevice);
 
     // Set the kernel dimensions and call the kernel
     dim3 dimGrid(ceil((float)W_out / TILE_WIDTH), ceil((float)H_out / TILE_WIDTH), M);
     dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
 
     conv_forward_kernel<<<dimGrid, dimBlock>>>(device_y, device_x, device_k, B, M, C, H, W, K);
+    // conv_forward_kernel<<<dimGrid, dimBlock>>>(device_y, device_x, B, M, C, H, W, K);
 
     // Copy the output back to host
     cudaMemcpy(host_y, device_y, outputArrayLength * sizeof(*device_y), cudaMemcpyDeviceToHost);

@@ -19,6 +19,6 @@ commands:
       #- /bin/bash -c "time ./m2 100"
       #- /bin/bash -c "time ./m3 10000"
       #- nsys profile --stats=true ./m3
-      - nv-nsight-cu-cli --section ".*" -o analysis_file ./m3
-      #- /bin/bash -c "./m4"
+      #- nv-nsight-cu-cli --section ".*" -o analysis_file ./m3
+      - /bin/bash -c "./m4 10000"
       #- /bin/bash -c "./final"
