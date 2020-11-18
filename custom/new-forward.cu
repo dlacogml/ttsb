@@ -22,45 +22,65 @@ __global__ void conv_forward_kernel(float* y, const float* x, const float* k, co
     W - input width dimension
     K - kernel height and width (K x K)
     */
+    extern __shared__ float s[];
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    //(void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    //(void)W_out; // silence declared but never referenced warning. remove this line when you start working
-
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = y4d(0,0,0,0)
-    // y4d(0,0,0,0) = a
+    const int s_width = TILE_WIDTH + K - 1;
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define s3d(i2, i1, i0) s[(i2) * (s_width * s_width) + (i1) * (s_width) + i0]
 
     // Insert your GPU convolution kernel code here
     const int m = blockIdx.z;
     const int h = blockIdx.y*TILE_WIDTH + threadIdx.y;
     const int w = blockIdx.x*TILE_WIDTH + threadIdx.x;
 
-    if (h >= H_out || w >= W_out) {
-        return;
-    }
-
     for (int b = 0; b < B; ++b) {
-        float acc = 0.0f;
-        for (int c = 0; c < C; ++c) {
-            for (int p = 0; p < K; ++p) {
-                for (int q = 0; q < K; ++q) {
-                    acc += x4d(b, c, h + p, w + q) * k4d(m, c, p, q);
+        // Copy input to shared memory
+        for (int i = 0; i * TILE_WIDTH < s_width; ++i) {
+            for (int j = 0; j * TILE_WIDTH < s_width; ++j) {
+                int s_h = i * TILE_WIDTH + threadIdx.y;
+                int s_w = j * TILE_WIDTH + threadIdx.x;
+                if (s_h < s_width && s_w < s_width) {
+                    int i_h = i * TILE_WIDTH + h;
+                    int i_w = j * TILE_WIDTH + w;
+                    for (int c = 0; c < C; ++c) {
+                        if (i_h < H && i_w < W) {
+                            s3d(c, s_h, s_w) = x4d(b, c, i_h, i_w);
+                        } else {
+                            s3d(c, s_h, s_w) = 0.0f;
+                        }
+                    }
                 }
             }
         }
-        y4d(b, m, h, w) = acc;
+
+        __syncthreads();
+
+        if (h < H_out && w < W_out) {
+            float acc = 0.0f;
+            for (int c = 0; c < C; ++c) {
+                for (int p = 0; p < K; ++p) {
+                    for (int q = 0; q < K; ++q) {
+                        acc += s3d(c, threadIdx.y + p, threadIdx.x + q) * k4d(m, c, p, q);
+                        // acc += x4d(b, c, h + p, w + q) * k4d(m, c, p, q);
+                    }
+                }
+            }
+            y4d(b, m, h, w) = acc;
+        }
+
+        __syncthreads();
     }
+
 
 #undef y4d
 #undef x4d
 #undef k4d
+#undef s3d
 }
 
 __host__ void GPUInterface::conv_forward_gpu(float* host_y, const float* host_x, const float* host_k, const int B, const int M, const int C, const int H, const int W, const int K)
@@ -89,7 +109,10 @@ __host__ void GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
     dim3 dimGrid(ceil((float)W_out / TILE_WIDTH), ceil((float)H_out / TILE_WIDTH), M);
     dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
 
-    conv_forward_kernel<<<dimGrid, dimBlock>>>(device_y, device_x, device_k, B, M, C, H, W, K);
+    unsigned int s_size = C * (TILE_WIDTH + K - 1) * (TILE_WIDTH + K - 1) * sizeof(float);
+    printf("B: %u\tM: %u\tC: %u\tH: %u\tW: %u\tK: %u\n", B, M, C, H, W, K);
+    printf("s_size: %u\n", s_size);
+    conv_forward_kernel<<<dimGrid, dimBlock, s_size>>>(device_y, device_x, device_k, B, M, C, H, W, K);
 
     // Copy the output back to host
     cudaMemcpy(host_y, device_y, outputArrayLength * sizeof(*device_y), cudaMemcpyDeviceToHost);
