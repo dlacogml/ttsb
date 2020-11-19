@@ -2,7 +2,6 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 16
 #define wbCheck(stmt)                                                         \
   do {                                                                        \
     cudaError_t err = stmt;                                                   \
@@ -12,6 +11,9 @@
       exit(1);                                                                \
     }                                                                         \
   } while (0)
+
+#define LAYER1_WIDTH 8
+#define LAYER2_WIDTH 20
 
 static constexpr size_t smsize = 1 << 16;
 static constexpr size_t smfloats = smsize / sizeof(float);
@@ -41,48 +43,78 @@ conv_forward_kernel(float* y, const float* x, const float* k, const int B,
     W - input width dimension
     K - kernel height and width (K x K)
     */
+    extern __shared__ float s[];
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
+    const int s_width = blockDim.x + K - 1;
 
-    auto y4d = [&y, M, H_out, W_out](int i3, int i2, int i1, int i0) -> float&
-    {
-        return y[i3*M*H_out*W_out + i2*H_out*W_out + i1*W_out + i0];
-    };
-    auto x4d = [&x, C, H, W](int i3, int i2, int i1, int i0) -> float {
-        return x[i3*C*H*W + i2*H*W + i1*W + i0];
-    };
-    auto k4d = [&k, C, K](int  i3, int i2, int i1, int i0) -> float {
-        return c_weights[i3*C*K*K + i2*K*K + i1*K + i0];
-    };
-// #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-// #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-// #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    // auto y4d = [&y, M, H_out, W_out](int i3, int i2, int i1, int i0) -> float&
+    // {
+    //     return y[i3*M*H_out*W_out + i2*H_out*W_out + i1*W_out + i0];
+    // };
+    // auto x4d = [&x, C, H, W](int i3, int i2, int i1, int i0) -> float {
+    //     return x[i3*C*H*W + i2*H*W + i1*W + i0];
+    // };
+    // auto k4d = [&k, C, K](int i3, int i2, int i1, int i0) -> float {
+    //     return c_weights[i3*C*K*K + i2*K*K + i1*K + i0];
+    // };
+    // auto s3d = [s_width](int i2, int i1, int i0) -> float& {
+    //     return s[i2*s_width*s_width + i1*s_width + i0];
+    // };
+
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define s3d(i2, i1, i0) s[(i2) * (s_width * s_width) + (i1) * (s_width) + i0]
 
     // Insert your GPU convolution kernel code here
     const int m = blockIdx.z;
-    const int h = blockIdx.y*TILE_WIDTH + threadIdx.y;
-    const int w = blockIdx.x*TILE_WIDTH + threadIdx.x;
-
-    if (h >= H_out || w >= W_out) {
-        return;
-    }
+    const int h = blockIdx.y*blockDim.y + threadIdx.y;
+    const int w = blockIdx.x*blockDim.x + threadIdx.x;
 
     for (int b = 0; b < B; ++b) {
-        float acc = 0.0f;
-        for (int c = 0; c < C; ++c) {
-            for (int p = 0; p < K; ++p) {
-                for (int q = 0; q < K; ++q) {
-                    acc += x4d(b, c, h + p, w + q) * k4d(m, c, p, q);
+        // Copy input to shared memory
+        for (int i = 0; i * blockDim.y < s_width; ++i) {
+            for (int j = 0; j * blockDim.x < s_width; ++j) {
+                int s_h = i * blockDim.y + threadIdx.y;
+                int s_w = j * blockDim.x + threadIdx.x;
+                if (s_h < s_width && s_w < s_width) {
+                    int i_h = i * blockDim.y + h;
+                    int i_w = j * blockDim.x + w;
+                    for (int c = 0; c < C; ++c) {
+                        if (i_h < H && i_w < W) {
+                            s3d(c, s_h, s_w) = x4d(b, c, i_h, i_w);
+                        } else {
+                            s3d(c, s_h, s_w) = 0.0f;
+                        }
+                    }
                 }
             }
         }
-        y4d(b, m, h, w) = acc;
+
+        __syncthreads();
+
+        if (h < H_out && w < W_out) {
+            float acc = 0.0f;
+            for (int c = 0; c < C; ++c) {
+                for (int p = 0; p < K; ++p) {
+                    for (int q = 0; q < K; ++q) {
+                        acc += s3d(c, threadIdx.y + p, threadIdx.x + q) * k4d(m, c, p, q);
+                    }
+                }
+            }
+            y4d(b, m, h, w) = acc;
+        }
+
+        __syncthreads();
     }
 
-#undef y4d
-#undef x4d
-#undef k4d
+
+// #undef y4d
+// #undef x4d
+// #undef k4d
+// #undef s3d
 }
 
 __host__
@@ -123,10 +155,12 @@ GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
     cudaMemcpy(device_k, host_k, kernelArrayLength * sizeof(*host_k), cudaMemcpyHostToDevice);
 
     // Set the kernel dimensions and call the kernel
-    dim3 dimGrid(ceil((float)W_out / TILE_WIDTH), ceil((float)H_out / TILE_WIDTH), M);
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    unsigned int tile_width = (C == 1) ? LAYER1_WIDTH : LAYER2_WIDTH;
+    dim3 dimGrid(ceil((float)W_out / tile_width), ceil((float)H_out / tile_width), M);
+    dim3 dimBlock(tile_width, tile_width, 1);
 
-    conv_forward_kernel<<<dimGrid, dimBlock>>>(device_y, device_x, device_k, B, M, C, H, W, K);
+    unsigned int s_size = C * (tile_width + K - 1) * (tile_width + K - 1) * sizeof(float);
+    conv_forward_kernel<<<dimGrid, dimBlock, s_size>>>(device_y, device_x, device_k, B, M, C, H, W, K);
 
     // Copy the output back to host
     cudaMemcpy(host_y, device_y, outputArrayLength * sizeof(*device_y), cudaMemcpyDeviceToHost);
@@ -135,14 +169,6 @@ GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
     cudaFree(device_x);
     cudaFree(device_y);
     cudaFree(device_k);
-
-    // Useful snippet for error checking
-    // cudaError_t error = cudaGetLastError();
-    // if(error != cudaSuccess)
-    // {
-    //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
-    //     exit(-1);
-    // }
 }
 
 __host__ void GPUInterface::get_device_properties()
