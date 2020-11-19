@@ -1,11 +1,9 @@
 #include <cmath>
 #include <iostream>
 #include "gpu-new-forward.h"
+#include <cstdio>
+#include <cassert>
 
-#define LAYER1_WIDTH 8
-#define LAYER2_WIDTH 20
-
-#ifndef wbCheck
 #define wbCheck(stmt)                                                         \
   do {                                                                        \
     cudaError_t err = stmt;                                                   \
@@ -15,10 +13,7 @@
       exit(-1);                                                               \
     }                                                                         \
   } while (0)
-#endif
 
-#include "conv1.cuh"
-#include "conv2.cuh"
 template <size_t tile_width=16>
 __global__
 void
@@ -104,7 +99,7 @@ conv_forward_kernel(float *y, const float *x, const float *k, const int B,
 
 __host__
 void
-nathan_conv_forward_gpu(float* host_y, const float* host_x,
+GPUInterface::conv_forward_gpu(float* host_y, const float* host_x,
                                const float* host_k, const int B, const int M,
                                const int C, const int H, const int W,
                                const int K)
@@ -168,28 +163,6 @@ nathan_conv_forward_gpu(float* host_y, const float* host_x,
     //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
     //     exit(-1);
     // }
-}
-
-__host__
-void
-GPUInterface::conv_forward_gpu(
-        float* host_y, const float* host_x, const float* host_k, const int B,
-        const int M, const int C, const int H, const int W, const int K)
-{
-    printf("(B, M, C, H, W, K) = (%d, %d, %d, %d, %d, %d)\n",
-            B, M, C, H, W, K);
-    if (C == 1) {
-        size_t outputsize;
-        do_layer1(host_y, host_x, host_k, outputsize);
-    }
-    else if (C == 4) {
-        nathan_conv_forward_gpu(host_y, host_x, host_k, B, M, C, H, W, K);
-        // do_layer2(host_y, host_x, host_k);
-    }
-    else {
-        printf("C == %d is not supported\n", C);
-    }
-    // get_device_properties();
 }
 
 __host__ void GPUInterface::get_device_properties()
