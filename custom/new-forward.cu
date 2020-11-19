@@ -17,6 +17,7 @@
   } while (0)
 #endif
 
+#define BLOCKSIZE = 100
 #include "conv1.cuh"
 #include "conv2.cuh"
 template <size_t tile_width=16>
@@ -183,8 +184,8 @@ GPUInterface::conv_forward_gpu(
         do_layer1(host_y, host_x, host_k, outputsize);
     }
     else if (C == 4) {
-        nathan_conv_forward_gpu(host_y, host_x, host_k, B, M, C, H, W, K);
-        // do_layer2(host_y, host_x, host_k);
+        // nathan_conv_forward_gpu(host_y, host_x, host_k, B, M, C, H, W, K);
+        do_layer2(host_y, host_x, host_k);
     }
     else {
         printf("C == %d is not supported\n", C);

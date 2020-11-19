@@ -18,7 +18,7 @@ commands:
       # You may modify the commands below. Uncomment/Comment lines based on the milestone
       #- /bin/bash -c "time ./m2 100"
       #- /bin/bash -c "time ./m3 10000"
-      #- nsys profile --stats=true ./m3
-      #- nv-nsight-cu-cli --section ".*" -o analysis_file ./m3
-      - /bin/bash -c "time ./m4 10000"
+      #- nsys profile --stats=true ./m4
+      - nv-nsight-cu-cli --section ".*" -o analysis_file ./m4 10000
+      #- /bin/bash -c "time ./m4 10000"
       #- /bin/bash -c "./final"

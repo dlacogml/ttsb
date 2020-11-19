@@ -16,6 +16,7 @@
   } while (0)
 #endif
 
+
 struct L1Config {
     /// Batch Size
     static constexpr size_t B = 10000;

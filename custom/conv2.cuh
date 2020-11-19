@@ -15,7 +15,6 @@
     }                                                                         \
   } while (0)
 #endif
-
 struct L2Config {
     /// Batch Size
     static constexpr size_t B = 10000;
@@ -30,9 +29,9 @@ struct L2Config {
     /// Width of convolution kernel
     static constexpr size_t K = 7;
     /// Number of rows of output channels
-    static constexpr int H_out = H-K+1;
+    static constexpr int H_out = H-(K-1);
     /// Number of columns of output channels
-    static constexpr int W_out = W-K+1;
+    static constexpr int W_out = W-(K-1);
     using l2_t = float;
     /// Number of Kernel weights
     static constexpr size_t KernelLength = K*K*M*C;
@@ -82,24 +81,25 @@ struct L2Config {
     }
     /// @brief Compute the index of a filter weight based on
     /// @param och --- the output channel of the filter
+    /// @param ich --- the input channel of the filter
     /// @param row --- the row of the weight in the filter
     /// @param col --- the column of the weight in the filter
     /// @return the index into the one-dim array
     __device__
-    static constexpr size_t kidx(int och, int row, int col)
+    static constexpr size_t kidx(int och, int ich, int row, int col)
     {
-        return och*K*K + row*K + col;
+        return och*C*K*K + ich*K*K + row*K + col;
     }
     __device__
     static constexpr int get_row(int blockIdxZ, int threadIdxX)
     {
-        return (blockIdxZ % blocks_per_channel_w) * L2Config::outblock_width +
+        return (blockIdxZ / blocks_per_channel_w) * L2Config::outblock_width +
             threadIdxX;
     }
     __device__
     static constexpr int get_col(int blockIdxZ, int threadIdxY)
     {
-        return (blockIdxZ / blocks_per_channel_w) * L2Config::outblock_width +
+        return (blockIdxZ % blocks_per_channel_w) * L2Config::outblock_width +
             threadIdxY;
     }
 };
@@ -108,34 +108,90 @@ __constant__ L2Config::l2_t c_w2[L2Config::KernelLength];
 
 __global__
 void
+_conv2_forward_kernel(const float* _x, float* _y)
+{
+    auto y = [_y](int image, int och, int row, int col) -> float& {
+        return _y[L2Config::yidx(image, och, row, col)];
+    };
+    auto k = [](int och, int ich, int row, int col) -> const float {
+        return c_w2[L2Config::kidx(och, ich, row, col)];
+    };
+    auto x = [_x](int image, int ich, int row, int col) -> const float {
+        return _x[L2Config::xidx(image, ich, row, col)];
+    };
+    const int image_start = blockIdx.x * L2Config::mini_batch_size;
+    const int och  = blockIdx.y;
+    const int srow = threadIdx.y; /// Row in shared memory
+    const int scol = threadIdx.x; /// Column in shared memory
+    const int row  = L2Config::get_row(blockIdx.z, srow);
+    const int col  = L2Config::get_col(blockIdx.z, scol);
+    __shared__ float sm[L2Config::mini_batch_size][L2Config::C]
+                            [L2Config::block_width][L2Config::block_width];
+
+    // Load the data into shared memory!
+    {
+        for (int b = 0; b < L2Config::mini_batch_size; ++b) {
+        for (int ic = 0; ic < L2Config::C; ++ic) {
+            const int image = image_start + b;
+            sm[b][ic][srow][scol] = x(image, ic, row, col);
+        }}
+    }
+    __syncthreads_and(true);
+
+
+    if (srow < L2Config::outblock_width &&
+        scol < L2Config::outblock_width)
+    {
+        for (int b = 0; b < L2Config::mini_batch_size; ++b) {
+            const int image = b + image_start;
+            float acc = 0.0f;
+            for (int c = 0; c < L2Config::C; ++c) {
+                for (int p = 0; p < L2Config::K; ++p) {
+                for (int q = 0; q < L2Config::K; ++q) {
+                    // const float xval = x(image, c, row+p, col+q);
+                    const float xval = sm[b][c][srow+p][scol+q];
+                    const float kval = k(och, c, p, q);
+                    acc += xval * kval;
+                }}
+            }
+            y(image, och, row, col) = acc;
+        }
+    }
+
+}
+
+__global__
+void
 conv2_forward_kernel(const float* _x, float* _y)
 {
     auto y = [_y](int image, int och, int row, int col) -> float& {
         return _y[L2Config::yidx(image, och, row, col)];
     };
+    auto k = [](int och, int ich, int row, int col) -> const float {
+        return c_w2[L2Config::kidx(och, ich, row, col)];
+    };
     auto x = [_x](int image, int ich, int row, int col) -> const float {
         return _x[L2Config::xidx(image, ich, row, col)];
-    };
-    auto k = [](int och, int row, int col) -> const float {
-        return c_w2[L2Config::kidx(och, row, col)];
     };
 
     __shared__ float sm[L2Config::mini_batch_size][L2Config::C]
                             [L2Config::block_width][L2Config::block_width];
 
     const int image_start = blockIdx.x * L2Config::mini_batch_size;
-    const int och = blockIdx.y;
+    const int och  = blockIdx.y;
     const int srow = threadIdx.y; /// Row in shared memory
     const int scol = threadIdx.x; /// Column in shared memory
-    const int row = L2Config::get_row(blockIdx.z, srow);
-    const int col = L2Config::get_col(blockIdx.z, scol);
+    const int row  = L2Config::get_row(blockIdx.z, srow);
+    const int col  = L2Config::get_col(blockIdx.z, scol);
 
     // Load the data into shared memory!
-    for (int b = 0; b < L2Config::mini_batch_size; ++b) {
-    for (int ic = 0; ic < L2Config::C; ++ic) {
-        const int image = image_start + b;
-        sm[b][ic][srow][scol] = x(image, ic, row, col);
-    }}
+    {
+        for (int b = 0; b < L2Config::mini_batch_size; ++b) {
+        for (int ic = 0; ic < L2Config::C; ++ic) {
+            const int image = image_start + b;
+            sm[b][ic][srow][scol] = x(image, ic, row, col);
+        }}
+    }
     __syncthreads_and(true);
 
     // Data is loaded and we are ready to compute
@@ -145,16 +201,20 @@ conv2_forward_kernel(const float* _x, float* _y)
         for (int b = 0; b < L2Config::mini_batch_size; ++b) {
             const int image = image_start + b;
             float acc = 0.0f;
+            for (int ich = 0; ich < L2Config::C; ++ich) {
             for (int p = 0; p < L2Config::K; ++p) {
             for (int q = 0; q < L2Config::K; ++q) {
-                float kval = k(och, p, q);
-                float sumacc = 0.0f;
-                for (int ic = 0; ic < L2Config::C; ++ic) {
-                    float xval = sm[b][ic][srow+p][scol+q];
-                    sumacc += xval;
-                }
-                acc += sumacc * kval;
-            }}
+                const float kval = k(och, ich, p, q);
+                const float xval = sm[b][ich][srow+p][scol+q];
+                // const float xval =
+                //     _x[
+                //         b*L2Config::C*L2Config::H*L2Config::W +
+                //         ich*L2Config::H*L2Config::W +
+                //         row*L2Config::W +
+                //         col
+                //     ];
+                acc +=  xval * kval;
+            }}}
             y(image, och, row, col) = acc;
         }
     }
@@ -193,7 +253,7 @@ do_layer2(
     dim3 GridDim(L2Config::num_mini_batch, L2Config::M,
                  L2Config::blocks_per_channel);
 
-    conv2_forward_kernel<<<GridDim, BlockDim>>>(device_x, device_y);
+    _conv2_forward_kernel<<<GridDim, BlockDim>>>(device_x, device_y);
     cudaDeviceSynchronize();
 
     wbCheck(cudaMemcpy(host_y, device_y, outputsize, cudaMemcpyDeviceToHost));
